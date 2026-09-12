@@ -1,0 +1,138 @@
+name: Build, Push, Deploy
+
+# CI/CD bridge for the single Hetzner K3s server, matching the model used by
+# english-core-speaking, kioti-crm-discount-enhance-demo, and
+# cleanbrain-me-entrance: build+push an image to GHCR, then SSH into the
+# server and `kubectl set image` the running Deployment. Declarative base
+# manifests (namespace/probes/routing) live in the cleanbrain-me-infra repo
+# and are NOT re-applied here.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# No pull_request trigger -- only main pushes and manual dispatch reach
+# build-and-push/deploy, and deploy additionally gates on github.ref.
+concurrency:
+  group: cleanbrain-me-visitor-counter-production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: cleanbrain-developer
+  IMAGE_NAME: cleanbrain-me-visitor-counter
+  NAMESPACE: cleanbrain-me-visitor-counter
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+  build-and-push:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      sha: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    # ENABLE_PRODUCTION_DEPLOY is a repo VARIABLE (Settings -> Secrets and
+    # variables -> Actions -> Variables), not a secret -- it starts unset
+    # (falsy) so this job is skipped, not failed, until the cluster
+    # administrator has bootstrapped the api Deployment by hand (see
+    # cleanbrain-me-infra's README "First-time deployment"). `kubectl set
+    # image` on a Deployment that doesn't exist yet would hard-fail the run.
+    if: github.ref == 'refs/heads/main' && vars.ENABLE_PRODUCTION_DEPLOY == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # Proper host-key verification instead of TOFU/StrictHostKeyChecking=no.
+      # HETZNER_SSH_KNOWN_HOSTS is the output of `ssh-keyscan -p <port> -H
+      # <host>` captured once by the administrator -- see cleanbrain-me-infra's
+      # README for the exact command and independent-verification steps.
+      - name: Configure known SSH host key
+        env:
+          KNOWN_HOSTS: ${{ secrets.HETZNER_SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy over SSH
+        env:
+          SSH_KEY: ${{ secrets.HETZNER_SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.HETZNER_SSH_HOST }}
+          SSH_USER: ${{ secrets.HETZNER_SSH_USER }}
+          SSH_PORT: ${{ secrets.HETZNER_SSH_PORT }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          KEY_FILE="$(mktemp)"
+          printf '%s\n' "$SSH_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          PORT="${SSH_PORT:-22}"
+
+          # Built as a variable (not a heredoc) so no dedented terminator
+          # line can prematurely end this step's YAML block scalar.
+          # $1 is filled in remotely by `bash -s -- "$GIT_SHA"` below, not
+          # by this outer shell (single quotes keep it literal here).
+          REMOTE_SCRIPT='set -euo pipefail
+          SHA="$1"
+          NS="cleanbrain-me-visitor-counter"
+          # Explicit, not relying on default ~/.kube/config discovery --
+          # see cleanbrain-me-infra README "CI kubeconfig behavior" and
+          # "Multi-application kubeconfig on the deploy host" for why this
+          # app needs its own --context flag once it shares the deploy
+          # host'"'"'s kubeconfig with other applications.
+          export KUBECONFIG=/home/deploy/.kube/config
+          kubectl --context=ci-deployer-cleanbrain-me-visitor-counter@cleanbrain-me-k3s -n "$NS" set image deployment/api api=ghcr.io/cleanbrain-developer/cleanbrain-me-visitor-counter:"$SHA"
+          kubectl --context=ci-deployer-cleanbrain-me-visitor-counter@cleanbrain-me-k3s -n "$NS" rollout status deployment/api --timeout=120s'
+
+          # StrictHostKeyChecking=yes against the known_hosts file staged
+          # above -- an unrecognized or changed host key aborts the
+          # connection instead of silently trusting it.
+          ssh -i "$KEY_FILE" -p "$PORT" \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$SSH_USER@$SSH_HOST" bash -s -- "$GIT_SHA" <<< "$REMOTE_SCRIPT"
+
+          rm -f "$KEY_FILE"
