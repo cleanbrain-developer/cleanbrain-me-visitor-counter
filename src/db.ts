@@ -32,6 +32,21 @@ db.exec(`
   );
 `);
 
+// One-time-per-restart backfill: visitor_seen didn't exist before this
+// table was added, so any visitor already sitting in the still-unpurged
+// "visits" raw log (up to VISITOR_RETENTION_DAYS old) would otherwise be
+// invisible to "all-time" until they happened to visit again -- making
+// All briefly read lower than Today, which can never be true by
+// definition (today's visitors are a subset of all-time visitors).
+// INSERT OR IGNORE makes this idempotent, so it's safe to run on every
+// startup rather than needing a separate one-shot migration step.
+db.exec(`
+  INSERT OR IGNORE INTO visitor_seen (service, ip_hash, user_agent, first_seen_at)
+  SELECT service, ip_hash, user_agent, MIN(created_at)
+  FROM visits
+  GROUP BY service, ip_hash, user_agent;
+`);
+
 export function purgeOldVisits(): number {
   const cutoff = new Date(
     Date.now() - env.retentionDays * 24 * 60 * 60 * 1000,
