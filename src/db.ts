@@ -20,17 +20,48 @@ db.exec(`
     ON visits(service, created_at);
 
   -- Permanent (never purged) record of every distinct (service, ip_hash,
-  -- user_agent) ever seen, one row each. This is what "All" (cumulative
-  -- unique visitors) is computed from -- "visits" above only keeps a few
-  -- days of raw log and can't answer an all-time question.
+  -- user_agent, day) combination ever seen, one row each -- "day" is the
+  -- UTC calendar date, so a returning visitor is counted again on each new
+  -- day they show up, the same way "Today" counts them again tomorrow.
+  -- "All" is a running total of unique-visitor-days, not unique-visitors-
+  -- ever: it only ever goes up, including from return visits, which reads
+  -- as a proper cumulative counter rather than a number that stalls once
+  -- everyone who'll ever visit has visited once.
   CREATE TABLE IF NOT EXISTS visitor_seen (
     service TEXT NOT NULL,
     ip_hash TEXT NOT NULL,
     user_agent TEXT NOT NULL,
+    day TEXT NOT NULL,
     first_seen_at TEXT NOT NULL,
-    PRIMARY KEY (service, ip_hash, user_agent)
+    PRIMARY KEY (service, ip_hash, user_agent, day)
   );
 `);
+
+// Migrate the earlier schema (no "day" column, one row per visitor ever,
+// not per visitor-day). Detected by column absence rather than a version
+// table since this is the only schema change so far; each visitor's
+// existing first_seen_at's own date becomes their first counted day so no
+// history is discarded, just re-bucketed.
+const visitorSeenColumns = db
+  .prepare("PRAGMA table_info(visitor_seen)")
+  .all() as Array<{ name: string }>;
+if (!visitorSeenColumns.some((c) => c.name === "day")) {
+  db.exec(`
+    ALTER TABLE visitor_seen RENAME TO visitor_seen_pre_day;
+    CREATE TABLE visitor_seen (
+      service TEXT NOT NULL,
+      ip_hash TEXT NOT NULL,
+      user_agent TEXT NOT NULL,
+      day TEXT NOT NULL,
+      first_seen_at TEXT NOT NULL,
+      PRIMARY KEY (service, ip_hash, user_agent, day)
+    );
+    INSERT OR IGNORE INTO visitor_seen (service, ip_hash, user_agent, day, first_seen_at)
+    SELECT service, ip_hash, user_agent, substr(first_seen_at, 1, 10), first_seen_at
+    FROM visitor_seen_pre_day;
+    DROP TABLE visitor_seen_pre_day;
+  `);
+}
 
 // One-time-per-restart backfill: visitor_seen didn't exist before this
 // table was added, so any visitor already sitting in the still-unpurged
@@ -41,10 +72,10 @@ db.exec(`
 // INSERT OR IGNORE makes this idempotent, so it's safe to run on every
 // startup rather than needing a separate one-shot migration step.
 db.exec(`
-  INSERT OR IGNORE INTO visitor_seen (service, ip_hash, user_agent, first_seen_at)
-  SELECT service, ip_hash, user_agent, MIN(created_at)
+  INSERT OR IGNORE INTO visitor_seen (service, ip_hash, user_agent, day, first_seen_at)
+  SELECT service, ip_hash, user_agent, substr(created_at, 1, 10), MIN(created_at)
   FROM visits
-  GROUP BY service, ip_hash, user_agent;
+  GROUP BY service, ip_hash, user_agent, substr(created_at, 1, 10);
 `);
 
 export function purgeOldVisits(): number {

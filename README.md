@@ -3,8 +3,12 @@
 Shared anonymous "today" and "all-time" visitor count API for every
 `cleanbrain.me` service (`entrance`, `developer`, `english-core-speaking`,
 `relayhub-java`, `kioti-crm-discount`). A visitor is the distinct
-`(IP, User-Agent)` pair seen for a service — "today" scopes that to the
-caller's local calendar day, "all-time" never resets.
+`(IP, User-Agent)` pair seen for a service on a given day — "today" scopes
+that to the caller's local calendar day; "all-time" is a running total of
+unique-visitor-days (a returning visitor is counted again on each new UTC
+day they show up, the same way "today" counts them again tomorrow), so it
+only ever goes up and never stalls once everyone who'll ever visit has
+visited once.
 
 Deployment manifests for this service live in `cleanbrain-me-infra`, not
 here, following the same split used by every other application in that
@@ -30,8 +34,10 @@ next local midnight in `tz`, computed from UTC-stored timestamps. `400` if
 ### `GET /v1/visits/all?service=<service-id>`
 
 Returns `{ "service", "count" }`, where `count` is the number of distinct
-`(IP, User-Agent)` visitors ever recorded for that service, with no time
-bound. `400` if `service` is unrecognized.
+`(service, IP, User-Agent, UTC calendar day)` combinations ever recorded --
+i.e. a cumulative total of unique-visitor-days, not unique-visitors-ever, so
+a visitor who returns on a later day adds to it again. `400` if `service`
+is unrecognized.
 
 ### `GET /healthz`
 
@@ -44,9 +50,10 @@ client IP, salted with `VISITOR_IP_HASH_SALT` — the raw IP is never
 persisted), `user_agent`, `created_at` (UTC ISO 8601) — is a short-lived raw
 log: rows older than `VISITOR_RETENTION_DAYS` (default 3) are purged daily,
 since only "today" is ever queried against it. `visitor_seen` — one
-permanent row per distinct `(service, ip_hash, user_agent)` ever seen, never
-purged — is what "all-time" is computed from; `visits` alone can't answer
-that question once old rows are gone.
+permanent row per distinct `(service, ip_hash, user_agent, day)` ever seen
+(`day` is the UTC calendar date), never purged — is what "all-time" is
+computed from; `visits` alone can't answer that question once old rows are
+gone.
 
 ## Environment variables
 

@@ -27,15 +27,16 @@ router.post("/v1/visits", (req, res) => {
   const ipHash = hashIp(req.ip ?? "unknown");
   const userAgent = req.get("user-agent") ?? "unknown";
   const createdAt = new Date().toISOString();
+  const day = createdAt.slice(0, 10); // UTC calendar day, e.g. "2026-09-14"
 
   db.prepare(
     "INSERT INTO visits (service, ip_hash, user_agent, created_at) VALUES (?, ?, ?, ?)",
   ).run(service, ipHash, userAgent, createdAt);
 
   db.prepare(
-    `INSERT OR IGNORE INTO visitor_seen (service, ip_hash, user_agent, first_seen_at)
-     VALUES (?, ?, ?, ?)`,
-  ).run(service, ipHash, userAgent, createdAt);
+    `INSERT OR IGNORE INTO visitor_seen (service, ip_hash, user_agent, day, first_seen_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(service, ipHash, userAgent, day, createdAt);
 
   res.status(204).end();
 });
