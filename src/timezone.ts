@@ -37,7 +37,12 @@ function getOffsetMinutes(utcInstant: Date, timeZone: string): number {
     Number(map.second),
   );
 
-  return (wallClockAsUtc - utcInstant.getTime()) / 60_000;
+  // Real-world UTC offsets are always a whole number of minutes; rounding
+  // guards against `utcInstant` carrying sub-second milliseconds (the
+  // normal case for `new Date()`) turning this into a fractional value,
+  // which would otherwise leak a few hundred ms of drift into every
+  // downstream midnight-boundary calculation.
+  return Math.round((wallClockAsUtc - utcInstant.getTime()) / 60_000);
 }
 
 export function getTodayUtcRange(
