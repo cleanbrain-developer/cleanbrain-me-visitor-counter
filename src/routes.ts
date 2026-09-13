@@ -32,6 +32,11 @@ router.post("/v1/visits", (req, res) => {
     "INSERT INTO visits (service, ip_hash, user_agent, created_at) VALUES (?, ?, ?, ?)",
   ).run(service, ipHash, userAgent, createdAt);
 
+  db.prepare(
+    `INSERT OR IGNORE INTO visitor_seen (service, ip_hash, user_agent, first_seen_at)
+     VALUES (?, ?, ?, ?)`,
+  ).run(service, ipHash, userAgent, createdAt);
+
   res.status(204).end();
 });
 
@@ -72,6 +77,21 @@ router.get("/v1/visits/today", (req, res) => {
   };
 
   res.json({ service, tz, count: row.count });
+});
+
+router.get("/v1/visits/all", (req, res) => {
+  const service = req.query.service;
+
+  if (!isKnownService(service)) {
+    res.status(400).json({ error: "invalid or missing 'service'" });
+    return;
+  }
+
+  const row = db
+    .prepare("SELECT COUNT(*) AS count FROM visitor_seen WHERE service = ?")
+    .get(service) as { count: number };
+
+  res.json({ service, count: row.count });
 });
 
 router.get("/healthz", (_req, res) => {

@@ -18,6 +18,18 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_visits_service_created_at
     ON visits(service, created_at);
+
+  -- Permanent (never purged) record of every distinct (service, ip_hash,
+  -- user_agent) ever seen, one row each. This is what "All" (cumulative
+  -- unique visitors) is computed from -- "visits" above only keeps a few
+  -- days of raw log and can't answer an all-time question.
+  CREATE TABLE IF NOT EXISTS visitor_seen (
+    service TEXT NOT NULL,
+    ip_hash TEXT NOT NULL,
+    user_agent TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    PRIMARY KEY (service, ip_hash, user_agent)
+  );
 `);
 
 export function purgeOldVisits(): number {
