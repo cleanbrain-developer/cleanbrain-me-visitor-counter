@@ -1,7 +1,11 @@
 import { Router } from "express";
 import { db } from "./db.js";
 import { hashIp } from "./ipHash.js";
-import { InvalidTimezoneError, getTodayUtcRange } from "./timezone.js";
+import {
+  InvalidTimezoneError,
+  getLocalDateString,
+  getTodayUtcRange,
+} from "./timezone.js";
 
 export const router = Router();
 
@@ -18,20 +22,39 @@ function isKnownService(value: unknown): value is string {
 }
 
 router.post("/v1/visits", (req, res) => {
-  const { service } = req.body ?? {};
+  const { service, tz } = req.body ?? {};
   if (!isKnownService(service)) {
     res.status(400).json({ error: "invalid or missing 'service'" });
+    return;
+  }
+  if (typeof tz !== "string" || tz.length === 0) {
+    res.status(400).json({ error: "missing 'tz'" });
     return;
   }
 
   const ipHash = hashIp(req.ip ?? "unknown");
   const userAgent = req.get("user-agent") ?? "unknown";
   const createdAt = new Date().toISOString();
-  const day = createdAt.slice(0, 10); // UTC calendar day, e.g. "2026-09-14"
+
+  // The caller's own local calendar day, not the server's UTC day -- see
+  // getLocalDateString's comment. Using UTC here would let a visit made
+  // just after local midnight (in any timezone ahead of UTC) still land on
+  // the previous UTC day, silently missing a same-day return visit from
+  // "All" until UTC midnight also passes.
+  let day: string;
+  try {
+    day = getLocalDateString(tz);
+  } catch (err) {
+    if (err instanceof InvalidTimezoneError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
 
   db.prepare(
-    "INSERT INTO visits (service, ip_hash, user_agent, created_at) VALUES (?, ?, ?, ?)",
-  ).run(service, ipHash, userAgent, createdAt);
+    "INSERT INTO visits (service, ip_hash, user_agent, created_at, day) VALUES (?, ?, ?, ?, ?)",
+  ).run(service, ipHash, userAgent, createdAt, day);
 
   db.prepare(
     `INSERT OR IGNORE INTO visitor_seen (service, ip_hash, user_agent, day, first_seen_at)

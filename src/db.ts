@@ -14,7 +14,8 @@ db.exec(`
     service TEXT NOT NULL,
     ip_hash TEXT NOT NULL,
     user_agent TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    day TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_visits_service_created_at
     ON visits(service, created_at);
@@ -36,6 +37,16 @@ db.exec(`
     PRIMARY KEY (service, ip_hash, user_agent, day)
   );
 `);
+
+// Migrate the earlier "visits" schema (no "day" column). ADD COLUMN is
+// enough here -- existing rows just get day=NULL, which the backfill query
+// below already falls back to substr(created_at, 1, 10) for.
+const visitsColumns = db
+  .prepare("PRAGMA table_info(visits)")
+  .all() as Array<{ name: string }>;
+if (!visitsColumns.some((c) => c.name === "day")) {
+  db.exec("ALTER TABLE visits ADD COLUMN day TEXT;");
+}
 
 // Migrate the earlier schema (no "day" column, one row per visitor ever,
 // not per visitor-day). Detected by column absence rather than a version
@@ -71,11 +82,17 @@ if (!visitorSeenColumns.some((c) => c.name === "day")) {
 // definition (today's visitors are a subset of all-time visitors).
 // INSERT OR IGNORE makes this idempotent, so it's safe to run on every
 // startup rather than needing a separate one-shot migration step.
+//
+// Prefers the caller's own local day (visits.day, populated on every POST
+// since the /v1/visits tz requirement was added) and only falls back to a
+// UTC-day approximation for rows written before that -- true local-day
+// bucketing isn't recoverable for those since their caller's tz was never
+// recorded, but every new visit going forward is exact.
 db.exec(`
   INSERT OR IGNORE INTO visitor_seen (service, ip_hash, user_agent, day, first_seen_at)
-  SELECT service, ip_hash, user_agent, substr(created_at, 1, 10), MIN(created_at)
+  SELECT service, ip_hash, user_agent, COALESCE(day, substr(created_at, 1, 10)), MIN(created_at)
   FROM visits
-  GROUP BY service, ip_hash, user_agent, substr(created_at, 1, 10);
+  GROUP BY service, ip_hash, user_agent, COALESCE(day, substr(created_at, 1, 10));
 `);
 
 export function purgeOldVisits(): number {

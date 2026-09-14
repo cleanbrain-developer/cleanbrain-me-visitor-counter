@@ -45,6 +45,32 @@ function getOffsetMinutes(utcInstant: Date, timeZone: string): number {
   return Math.round((wallClockAsUtc - utcInstant.getTime()) / 60_000);
 }
 
+// The caller's own local calendar date (e.g. "2026-09-15"), used to bucket
+// "All" by visitor-day the same way getTodayUtcRange buckets "Today" -- by
+// the caller's real local day, not the server's UTC day. Deriving this from
+// UTC alone (e.g. `isoString.slice(0, 10)`) is wrong for any timezone ahead
+// of UTC: a visit made just after local midnight can still fall on the
+// previous UTC calendar day, silently swallowing a same-day return visit
+// into the day before.
+export function getLocalDateString(
+  timeZone: string,
+  now: Date = new Date(),
+): string {
+  assertValidTimezone(timeZone);
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+
+  const map: Record<string, string> = {};
+  for (const part of parts) map[part.type] = part.value;
+
+  return `${map.year}-${map.month}-${map.day}`;
+}
+
 export function getTodayUtcRange(
   timeZone: string,
   now: Date = new Date(),
