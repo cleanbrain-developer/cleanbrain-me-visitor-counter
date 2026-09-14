@@ -98,3 +98,19 @@ router.get("/v1/visits/all", (req, res) => {
 router.get("/healthz", (_req, res) => {
   res.json({ status: "ok" });
 });
+
+// Temporary diagnostic route -- every visitor is currently hashing to the
+// same ip_hash regardless of real device/network, which means req.ip is
+// resolving to a constant (almost certainly the proxy hop's own address,
+// not the real client). This reflects back exactly what Express sees so
+// the actual header chain can be inspected from outside the cluster
+// instead of guessing. Remove once the root cause is confirmed and fixed.
+router.get("/debug/ip", (req, res) => {
+  res.json({
+    reqIp: req.ip,
+    reqIps: req.ips,
+    xForwardedFor: req.headers["x-forwarded-for"] ?? null,
+    xRealIp: req.headers["x-real-ip"] ?? null,
+    socketRemoteAddress: req.socket.remoteAddress ?? null,
+  });
+});
